@@ -604,6 +604,47 @@ class _Connection:
                     continue
 
                 data = json.loads(msg.data)
+                
+                # Check for error responses from the API
+                if data.get("error"):
+                    error_msg = data["error"]
+                    # ElevenLabs API errors - determine status code from error message
+                    status_code = 500  # Default to server error
+                    
+                    # Common ElevenLabs error patterns that indicate client errors (4xx)
+                    client_error_patterns = [
+                        "only_for_creator",  # 403 Forbidden
+                        "insufficient_quota",  # 402 Payment Required
+                        "invalid_api_key",  # 401 Unauthorized
+                        "voice_not_found",  # 404 Not Found
+                        "invalid_voice",  # 400 Bad Request
+                        "invalid_model",  # 400 Bad Request
+                        "rate_limit",  # 429 Too Many Requests
+                    ]
+                    
+                    error_lower = error_msg.lower()
+                    for pattern in client_error_patterns:
+                        if pattern in error_lower:
+                            if pattern == "only_for_creator":
+                                status_code = 403
+                            elif pattern == "insufficient_quota":
+                                status_code = 402
+                            elif pattern == "invalid_api_key":
+                                status_code = 401
+                            elif pattern in ["voice_not_found"]:
+                                status_code = 404
+                            elif pattern == "rate_limit":
+                                status_code = 429
+                            else:
+                                status_code = 400
+                            break
+                    
+                    raise APIStatusError(
+                        message=error_msg,
+                        status_code=status_code,
+                        request_id=data.get("request_id"),
+                    )
+                
                 context_id = data.get("contextId")
 
                 if not context_id or context_id not in self._context_emitters:

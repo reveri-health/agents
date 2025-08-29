@@ -6,7 +6,7 @@ import contextlib
 import pytest
 
 from livekit import rtc
-from livekit.agents import APIConnectionError, APIConnectOptions, APIError, utils
+from livekit.agents import APIConnectionError, APIConnectOptions, APIError, APIStatusError, utils
 from livekit.agents.tts import TTS, AvailabilityChangedEvent, FallbackAdapter
 from livekit.agents.tts.tts import SynthesizedAudio, SynthesizeStream
 from livekit.agents.utils.aio.channel import ChanEmpty
@@ -261,5 +261,57 @@ async def test_timeout():
 
     assert await asyncio.wait_for(fake1.stream_ch.recv(), 1.0)
     assert await asyncio.wait_for(fake2.stream_ch.recv(), 1.0)
+
+    await fallback_adapter.aclose()
+
+
+async def test_non_retryable_4xx_errors() -> None:
+    """Test that 403 and other 4xx errors are not retried by fallback adapter"""
+    # Create a fake TTS that raises a 403 error (non-retryable)
+    fake1 = FakeTTS(fake_exception=APIStatusError("Forbidden", status_code=403))
+    fake2 = FakeTTS(fake_audio_duration=5.0)
+
+    fallback_adapter = FallbackAdapterTester([fake1, fake2])
+
+    # The first TTS should fail with 403 (non-retryable), fallback to second
+    async with fallback_adapter.synthesize("hello test") as stream:
+        frames = []
+        async for data in stream:
+            frames.append(data.frame)
+
+        assert fake1.synthesize_ch.recv_nowait()
+        assert fake2.synthesize_ch.recv_nowait()
+
+        # Should get audio from the second TTS
+        assert rtc.combine_audio_frames(frames).duration == 5.01
+
+    # First TTS should be marked as unavailable
+    assert not fallback_adapter.availability_changed_ch(fake1).recv_nowait().available
+
+    await fallback_adapter.aclose()
+
+
+async def test_retryable_5xx_errors() -> None:
+    """Test that 5xx errors are retryable (current behavior should continue)"""
+    # Create a fake TTS that raises a 500 error (retryable)
+    fake1 = FakeTTS(fake_exception=APIStatusError("Internal Server Error", status_code=500))
+    fake2 = FakeTTS(fake_audio_duration=5.0)
+
+    fallback_adapter = FallbackAdapterTester([fake1, fake2])
+
+    # The first TTS should fail with 500 (retryable), fallback to second
+    async with fallback_adapter.synthesize("hello test") as stream:
+        frames = []
+        async for data in stream:
+            frames.append(data.frame)
+
+        assert fake1.synthesize_ch.recv_nowait()
+        assert fake2.synthesize_ch.recv_nowait()
+
+        # Should get audio from the second TTS
+        assert rtc.combine_audio_frames(frames).duration == 5.01
+
+    # First TTS should be marked as unavailable
+    assert not fallback_adapter.availability_changed_ch(fake1).recv_nowait().available
 
     await fallback_adapter.aclose()
